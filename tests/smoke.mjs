@@ -1,0 +1,104 @@
+import { chromium } from '@playwright/test';
+import { mkdir } from 'node:fs/promises';
+import assert from 'node:assert/strict';
+
+const base = process.env.APP_URL || 'http://127.0.0.1:5173';
+await mkdir('artifacts', { recursive: true });
+const browser = await chromium.launch({ headless: true });
+const errors = [];
+const desktop = await browser.newContext({ viewport: { width: 1440, height: 1000 }, locale: 'ru-RU' });
+const page = await desktop.newPage();
+page.on('pageerror', error => errors.push(error.message));
+page.on('console', message => { if (message.type() === 'error') console.log('Browser:', message.text()); });
+
+async function noOverflow(target) {
+  assert(await target.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), 'Page overflows horizontally');
+}
+
+try {
+  await page.goto(base);
+  await page.getByRole('heading', { name: 'Вход в группу' }).waitFor();
+  await page.getByLabel('Электронная почта').fill('anna@example.com');
+  await page.getByLabel('Пароль', { exact: true }).fill('testpass123');
+  await page.getByRole('button', { name: 'Войти', exact: true }).click();
+  await page.getByText('Вход и регистрация пока не подключены. Расписание доступно в демоверсии.', { exact: true }).waitFor();
+  await page.reload();
+  await page.screenshot({ path: 'artifacts/login-desktop.png', fullPage: true });
+  await page.getByRole('button', { name: 'Зарегистрироваться', exact: true }).click();
+  await page.getByLabel('Имя и фамилия').fill('Анна Вернадская');
+  await page.getByLabel('Электронная почта').fill('anna@example.com');
+  await page.getByLabel('Пароль', { exact: true }).fill('testpass123');
+  await page.getByLabel('Повторите пароль').fill('different123');
+  await page.getByRole('button', { name: 'Зарегистрироваться', exact: true }).click();
+  await page.getByText('Пароли не совпадают.', { exact: true }).waitFor();
+  await page.getByLabel('Повторите пароль').fill('testpass123');
+  await page.screenshot({ path: 'artifacts/register-desktop.png', fullPage: true });
+  await page.getByRole('button', { name: 'Вернуться ко входу' }).click();
+  await page.getByRole('button', { name: 'Забыли пароль?' }).click();
+  await page.getByRole('heading', { name: 'Восстановление доступа' }).waitFor();
+  await page.getByRole('button', { name: 'Вернуться ко входу' }).click();
+  await page.getByRole('button', { name: 'Открыть демоверсию' }).click();
+  await page.getByRole('heading', { name: 'Занятие не выбрано' }).waitFor();
+  await page.locator('.fc-event').first().waitFor();
+  await noOverflow(page);
+  const before = await page.getByTestId('calendar').boundingBox();
+  await page.screenshot({ path: 'artifacts/calendar-empty-desktop.png', fullPage: true });
+  const lesson = page.locator('.fc-event').first();
+  await lesson.focus();
+  await page.keyboard.press('Enter');
+  await page.getByRole('heading', { name: 'Запись занятия' }).waitFor();
+  const after = await page.getByTestId('calendar').boundingBox();
+  assert.equal(before.width, after.width, 'Calendar width moved on selection');
+  assert.equal(before.x, after.x, 'Calendar position moved on selection');
+  await page.screenshot({ path: 'artifacts/calendar-selected-desktop.png', fullPage: true });
+  await page.getByRole('button', { name: 'Закрыть подробности' }).click();
+  await page.getByRole('heading', { name: 'Занятие не выбрано' }).waitFor();
+  const monthTitle = await page.locator('h2[aria-live]').innerText();
+  await page.getByRole('button', { name: 'Следующий период' }).click();
+  assert.notEqual(await page.locator('h2[aria-live]').innerText(), monthTitle);
+  await page.getByRole('button', { name: 'Сегодня', exact: true }).click();
+  assert.equal(await page.locator('h2[aria-live]').innerText(), monthTitle);
+  await page.getByRole('button', { name: 'Неделя', exact: true }).click();
+  await page.locator('.fc-timeGridWeek-view').waitFor();
+  await page.screenshot({ path: 'artifacts/week-desktop.png', fullPage: true });
+  await page.getByRole('button', { name: 'Список', exact: true }).click();
+  await page.locator('.fc-listMonth-view').waitFor();
+  await page.getByLabel('Дисциплина', { exact: true }).selectOption({ label: 'Управление проектами' });
+  const titles = await page.locator('.fc-list-event-title').allTextContents();
+  assert(titles.length > 0 && titles.every(title => title.includes('Управление проектами')), 'Subject filter failed');
+  await page.getByLabel('Дисциплина', { exact: true }).selectOption('all');
+  await page.reload();
+  await page.getByRole('heading', { name: 'Расписание', exact: true }).waitFor();
+  await page.getByRole('button', { name: 'Выйти', exact: true }).click();
+  await page.getByRole('heading', { name: 'Вход в группу' }).waitFor();
+
+  const mobile = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, locale: 'ru-RU' });
+  const phone = await mobile.newPage();
+  phone.on('pageerror', error => errors.push(error.message));
+  await phone.goto(base);
+  await noOverflow(phone);
+  await phone.screenshot({ path: 'artifacts/login-mobile.png', fullPage: true });
+  await phone.getByRole('button', { name: 'Открыть демоверсию' }).click();
+  await phone.locator('.fc-listMonth-view').waitFor();
+  await phone.locator('.fc-list-event').first().waitFor();
+  await noOverflow(phone);
+  await phone.screenshot({ path: 'artifacts/calendar-mobile.png', fullPage: true });
+  await phone.locator('.fc-list-event').first().click();
+  await phone.getByRole('dialog').waitFor();
+  await noOverflow(phone);
+  assert.equal(await phone.evaluate(() => document.body.style.overflow), 'hidden');
+  await phone.screenshot({ path: 'artifacts/lesson-mobile.png' });
+  await phone.keyboard.press('Escape');
+  assert.equal(await phone.getByRole('dialog').count(), 0);
+  assert.notEqual(await phone.evaluate(() => document.body.style.overflow), 'hidden');
+  await phone.getByRole('button', { name: 'Месяц', exact: true }).click();
+  await phone.locator('.fc-dayGridMonth-view').waitFor();
+  await noOverflow(phone);
+  await phone.screenshot({ path: 'artifacts/month-mobile.png', fullPage: true });
+  await phone.setViewportSize({ width: 320, height: 700 });
+  await noOverflow(phone);
+  assert.deepEqual(errors, [], 'Browser runtime errors');
+  console.log('PASS: registration validation, auth navigation, demo session, calendar selection and stable geometry, navigation, views, filtering, logout, mobile dialog, 320/390px overflow checks.');
+} finally {
+  await browser.close();
+}
